@@ -92,6 +92,11 @@ function main({ pane, contextID, glslVersion }) {
 
         // Apply audio forces to the fluid simulation
         applyAudioForces(frequencyRanges);
+
+        // Compute target color based on frequency ranges
+        targetColor.r = mapRange(frequencyRanges.low, 0, 255, 0.0, 1.0);  // Red channel
+        targetColor.g = mapRange(frequencyRanges.mid, 0, 255, 0.0, 1.0);  // Green channel
+        targetColor.b = mapRange(frequencyRanges.high, 0, 255, 0.0, 1.0); // Blue channel
     }
 
     // Calculate average volumes for frequency ranges
@@ -111,10 +116,15 @@ function main({ pane, contextID, glslVersion }) {
         // Uncomment for detailed logging
         // console.log('Frequency ranges:', { low: lowFreqAvg, mid: midFreqAvg, high: highFreqAvg });
 
+        // Optional: Apply logarithmic scaling for better visual representation
+        const scaledLow = Math.log1p(lowFreqAvg) / Math.log1p(255);
+        const scaledMid = Math.log1p(midFreqAvg) / Math.log1p(255);
+        const scaledHigh = Math.log1p(highFreqAvg) / Math.log1p(255);
+
         return {
-            low: lowFreqAvg,
-            mid: midFreqAvg,
-            high: highFreqAvg,
+            low: scaledLow,
+            mid: scaledMid,
+            high: scaledHigh,
         };
     }
 
@@ -134,12 +144,12 @@ function main({ pane, contextID, glslVersion }) {
         const { low, mid, high } = frequencyRanges;
 
         // Map frequency amplitudes to force magnitudes
-        const lowForce = mapRange(low, 0, 255, 0, MAX_VELOCITY);
-        const midForce = mapRange(mid, 0, 255, 0, MAX_VELOCITY / 2);
-        const highForce = mapRange(high, 0, 255, 0, MAX_VELOCITY / 4);
+        const lowForce = mapRange(low, 0, 1, 0, MAX_VELOCITY); // Adjusted for scaledLow
+        const midForce = mapRange(mid, 0, 1, 0, MAX_VELOCITY / 2);
+        const highForce = mapRange(high, 0, 1, 0, MAX_VELOCITY / 4);
 
         // Uncomment for detailed logging
-        // console.log('Force magnitudes:', { lowForce, midForce, highForce });
+        console.log('Force magnitudes:', { lowForce, midForce, highForce });
 
         // Apply low-frequency forces (e.g., kick drums)
         if (lowForce > 5) {
@@ -557,13 +567,20 @@ function main({ pane, contextID, glslVersion }) {
         fragmentShader: `
         in vec2 v_uv;
         uniform sampler2D u_trailState;
+        uniform vec3 u_particleColor; // New uniform for particle color
         out vec4 out_color;
         void main() {
             vec3 background = vec3(0.98, 0.922, 0.843);
-            vec3 particle = vec3(0, 0, 0.2);
-            out_color = vec4(mix(background, particle, texture(u_trailState, v_uv).x), 1);
+            out_color = vec4(mix(background, u_particleColor, texture(u_trailState, v_uv).x), 1);
         }
         `,
+        uniforms: [
+            {
+                name: 'u_particleColor',
+                value: [0.0, 0.0, 1.0], // Initial color (blue)
+                type: FLOAT,
+            },
+        ],
     });
     const renderPressure = renderSignedAmplitudeProgram(composer, {
         name: 'renderPressure',
@@ -605,6 +622,11 @@ function main({ pane, contextID, glslVersion }) {
         ],
     });
 
+    // Color modulation variables
+    let currentColor = { r: 0.0, g: 0.0, b: 1.0 }; // Start with blue
+    let targetColor = { r: 0.0, g: 0.0, b: 1.0 };
+    const COLOR_SMOOTHING = 0.8; // Adjust between 0 (no smoothing) to 1 (instant change)
+
     // Main simulation loop
     function loop() {
         // Advect the velocity vector field
@@ -634,8 +656,16 @@ function main({ pane, contextID, glslVersion }) {
             output: velocityState,
         });
 
-        // Apply audio forces
+        // Apply audio forces and compute target color
         visualizeAudio();
+
+        // Smoothly interpolate currentColor towards targetColor
+        currentColor.r += (targetColor.r - currentColor.r) * COLOR_SMOOTHING;
+        currentColor.g += (targetColor.g - currentColor.g) * COLOR_SMOOTHING;
+        currentColor.b += (targetColor.b - currentColor.b) * COLOR_SMOOTHING;
+
+        // Update the u_particleColor uniform in renderTrails
+        renderTrails.setUniform('u_particleColor', [currentColor.r, currentColor.g, currentColor.b]);
 
         // Render based on selected parameter
         if (PARAMS.render === 'Pressure') {

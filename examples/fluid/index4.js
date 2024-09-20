@@ -19,25 +19,25 @@ function main({ pane, contextID, glslVersion }) {
     const PARAMS = {
         trailLength: 15,
         render: 'Fluid',
-        particleDensity: 0.1,
-        maxVelocity: 30,
-        touchForceScale: 2,
-        boundaryScale: 50,
+        particleDensity: 0.05, // Reduced from 0.1 for less clutter
+        maxVelocity: 15, // Reduced from 30 for smoother movement
+        touchForceScale: 1, // Reduced from 2 for less aggressive forces
+        // boundaryScale: 50, // Removed since boundary is no longer used
     };
 
     // Constants for the simulation
     let TOUCH_FORCE_SCALE = PARAMS.touchForceScale;
     let PARTICLE_DENSITY = PARAMS.particleDensity;
     const MAX_NUM_PARTICLES = 100000;
-    const PARTICLE_LIFETIME = 1000;
+    const PARTICLE_LIFETIME = 2000; // Increased from 1000 for longer trails
     const NUM_JACOBI_STEPS = 3;
     const PRESSURE_CALC_ALPHA = -1;
     const PRESSURE_CALC_BETA = 0.25;
     const NUM_RENDER_STEPS = 3;
     const VELOCITY_SCALE_FACTOR = 8;
     let MAX_VELOCITY = PARAMS.maxVelocity;
+    // let BOUNDARY_SCALE = PARAMS.boundaryScale; // Removed
     const POSITION_NUM_COMPONENTS = 4;
-    let BOUNDARY_SCALE = PARAMS.boundaryScale;
 
     let shouldSavePNG = false;
 
@@ -57,19 +57,7 @@ function main({ pane, contextID, glslVersion }) {
 
     // Handle audio file selection
     audioInput.addEventListener('change', function (event) {
-        const file = event.target.files[0];
-        if (file) {
-            console.log('Audio file selected:', file.name);
-            const fileURL = URL.createObjectURL(file);
-            audioElement = new Audio();
-            audioElement.src = fileURL;
-            audioElement.crossOrigin = "anonymous";
-            audioContext = new (window.AudioContext || window.webkitAudioContext)();
-            sourceNode = audioContext.createMediaElementSource(audioElement);
-
-            setupAudioProcessing();
-            playPauseBtn.disabled = false;
-        }
+        handleAudioUpload(event);
     });
 
     // Setup audio processing
@@ -86,6 +74,10 @@ function main({ pane, contextID, glslVersion }) {
         audioReady = true;
     }
 
+    // Smoothing factors
+    const SMOOTHING_FACTOR = 0.5;
+    let smoothedFrequencyRanges = { low: 0, mid: 0, high: 0 };
+
     // Visualize audio by processing frequency data
     function visualizeAudio() {
         if (!audioReady || !isPlaying) return;
@@ -99,16 +91,16 @@ function main({ pane, contextID, glslVersion }) {
         applyAudioForces(frequencyRanges);
 
         // Compute target color based on frequency ranges
-        targetColor.r = mapRange(frequencyRanges.low, 0, 1, 0.0, 1.0);  // Red channel
-        targetColor.g = mapRange(frequencyRanges.mid, 0, 1, 0.0, 1.0);  // Green channel
-        targetColor.b = mapRange(frequencyRanges.high, 0, 1, 0.0, 1.0); // Blue channel
+        targetColor.r = mapRange(smoothedFrequencyRanges.low, 0, 1, 0.0, 1.0);  // Red channel
+        targetColor.g = mapRange(smoothedFrequencyRanges.mid, 0, 1, 0.0, 1.0);  // Green channel
+        targetColor.b = mapRange(smoothedFrequencyRanges.high, 0, 1, 0.0, 1.0); // Blue channel
 
         // Debugging logs
-        console.log('Frequency Ranges:', frequencyRanges);
+        console.log('Frequency Ranges:', smoothedFrequencyRanges);
         console.log('Target Color:', targetColor);
     }
 
-    // Calculate average volumes for frequency ranges
+    // Calculate average volumes for frequency ranges with smoothing
     function getFrequencyRanges(frequencyData) {
         const bufferLength = frequencyData.length;
         const lowEnd = Math.floor(bufferLength * 0.1);
@@ -122,16 +114,17 @@ function main({ pane, contextID, glslVersion }) {
         const midFreqAvg = getAverageVolume(midFreqRange);
         const highFreqAvg = getAverageVolume(highFreqRange);
 
-        // Optional: Apply logarithmic scaling for better visual representation
+        // Apply logarithmic scaling for better visual representation
         const scaledLow = Math.log1p(lowFreqAvg) / Math.log1p(255);
         const scaledMid = Math.log1p(midFreqAvg) / Math.log1p(255);
         const scaledHigh = Math.log1p(highFreqAvg) / Math.log1p(255);
 
-        return {
-            low: scaledLow,
-            mid: scaledMid,
-            high: scaledHigh,
-        };
+        // Apply exponential smoothing
+        smoothedFrequencyRanges.low = SMOOTHING_FACTOR * scaledLow + (1 - SMOOTHING_FACTOR) * smoothedFrequencyRanges.low;
+        smoothedFrequencyRanges.mid = SMOOTHING_FACTOR * scaledMid + (1 - SMOOTHING_FACTOR) * smoothedFrequencyRanges.mid;
+        smoothedFrequencyRanges.high = SMOOTHING_FACTOR * scaledHigh + (1 - SMOOTHING_FACTOR) * smoothedFrequencyRanges.high;
+
+        return smoothedFrequencyRanges;
     }
 
     // Helper function to calculate average volume
@@ -145,74 +138,80 @@ function main({ pane, contextID, glslVersion }) {
         return ((value - inMin) * (outMax - outMin)) / (inMax - inMin) + outMin;
     }
 
+    // Define maximum total force
+    const MAX_TOTAL_FORCE = MAX_VELOCITY * 1.5;
+
+    // Define maximum shake magnitude
+    const MAX_SHAKE = 10; // Pixels
+
     // Apply forces to the fluid simulation based on audio frequencies
     function applyAudioForces(frequencyRanges) {
         const { low, mid, high } = frequencyRanges;
 
-        // Map frequency amplitudes to force magnitudes
-        const lowForce = mapRange(low, 0, 1, 0, MAX_VELOCITY); // Adjusted for scaledLow
-        const midForce = mapRange(mid, 0, 1, 0, MAX_VELOCITY / 2);
-        const highForce = mapRange(high, 0, 1, 0, MAX_VELOCITY / 4);
+        // Use a non-linear (power) scale for mapping
+        const lowForce = Math.pow(mapRange(low, 0, 1, 0, 1), 1.2) * MAX_VELOCITY; // Bass
+        const midForce = Math.pow(mapRange(mid, 0, 1, 0, 1), 1.5) * (MAX_VELOCITY / 2); // Mid frequencies
+        const highForce = Math.pow(mapRange(high, 0, 1, 0, 1), 2.0) * (MAX_VELOCITY / 4); // High frequencies
 
-        // Uncomment for detailed logging
+        // Calculate total force and clamp it
+        let totalForce = lowForce + midForce + highForce;
+        totalForce = Math.min(totalForce, MAX_TOTAL_FORCE);
+
+        // Debugging logs
         console.log('Force magnitudes:', { lowForce, midForce, highForce });
+        console.log('Clamped Total Force:', totalForce);
 
-        // Apply low-frequency forces (e.g., kick drums)
-        if (lowForce > 5) {
-            applyForceAtRandomPosition(lowForce, 50);
+        if (totalForce > 0) {
+            // Calculate average vector direction (smooth direction changes)
+            const angle = Math.random() * 2 * Math.PI;
+            const vector = [
+                totalForce * Math.cos(angle),
+                totalForce * Math.sin(angle),
+            ];
+
+            // Apply the global force across the entire fluid
+            touch.setUniform('u_vector', vector);
+            touch.setUniform('u_touchForceScale', TOUCH_FORCE_SCALE);
+            touch.setUniform('u_maxVelocity', MAX_VELOCITY);
+
+            // Apply the force uniformly by covering the entire canvas
+            composer.stepSegment({
+                program: touch,
+                input: velocityState,
+                output: velocityState,
+                position1: [0, 0],
+                position2: [canvas.clientWidth, canvas.clientHeight],
+                thickness: Math.max(canvas.clientWidth, canvas.clientHeight), // Cover the entire canvas
+                endCaps: false,
+            });
+
+            // Calculate shake magnitude based on totalForce
+            const shakeMagnitude = mapRange(totalForce, 0, MAX_TOTAL_FORCE, 0, MAX_SHAKE);
+            const shakeX = (Math.random() - 0.5) * 2 * shakeMagnitude;
+            const shakeY = (Math.random() - 0.5) * 2 * shakeMagnitude;
+            canvas.style.transform = `translate(${shakeX}px, ${shakeY}px)`;
+        } else {
+            // Reset shake when no force is applied
+            canvas.style.transform = `translate(0px, 0px)`;
         }
-
-        // Apply mid-frequency forces
-        if (midForce > 5) {
-            applyForceAtRandomPosition(midForce, 30);
-        }
-
-        // Apply high-frequency forces
-        if (highForce > 5) {
-            applyForceAtRandomPosition(highForce, 10);
-        }
-    }
-
-    // Apply a force at a random position on the canvas
-    function applyForceAtRandomPosition(forceMagnitude, thickness) {
-        const x = Math.random() * canvas.clientWidth;
-        const y = Math.random() * canvas.clientHeight;
-        const angle = Math.random() * 2 * Math.PI;
-        const vector = [
-            forceMagnitude * Math.cos(angle),
-            forceMagnitude * Math.sin(angle),
-        ];
-
-        // Set uniforms for the touch shader
-        touch.setUniform('u_vector', vector);
-        // Assuming 'composer.stepSegment' correctly applies the force
-        composer.stepSegment({
-            program: touch,
-            input: velocityState,
-            output: velocityState,
-            position1: [x, canvas.clientHeight - y],
-            position2: [x, canvas.clientHeight - y],
-            thickness: thickness,
-            endCaps: true,
-        });
     }
 
     // Calculate the number of particles based on canvas size
     function calcNumParticles(width, height) {
         return Math.min(Math.ceil(width * height * PARTICLE_DENSITY), MAX_NUM_PARTICLES);
     }
-    let NUM_PARTICLES = calcNumParticles(canvas.width, canvas.height);
+    let NUM_PARTICLES = calcNumParticles(canvas.width, canvas.clientHeight);
 
     // Initialize GPUComposer
     const composer = new GPUComposer({ canvas, contextID, glslVersion });
     console.log('GPUComposer initialized');
 
     // Initialize GPULayers for simulation state
-    const width = canvas.clientWidth;
-    const height = canvas.clientHeight;
+    const simulationWidth = canvas.clientWidth;
+    const simulationHeight = canvas.clientHeight;
     const velocityState = new GPULayer(composer, {
         name: 'velocity',
-        dimensions: [Math.ceil(width / VELOCITY_SCALE_FACTOR), Math.ceil(height / VELOCITY_SCALE_FACTOR)],
+        dimensions: [Math.ceil(simulationWidth / VELOCITY_SCALE_FACTOR), Math.ceil(simulationHeight / VELOCITY_SCALE_FACTOR)],
         type: FLOAT,
         filter: LINEAR,
         numComponents: 2,
@@ -267,17 +266,6 @@ function main({ pane, contextID, glslVersion }) {
         filter: NEAREST,
         numComponents: 1,
         numBuffers: 2,
-    });
-
-    // Initialize GPULayer for boundaries
-    const boundaryState = new GPULayer(composer, {
-        name: 'boundary',
-        dimensions: [canvas.width, canvas.height],
-        type: FLOAT,
-        filter: NEAREST,
-        numComponents: 1,
-        wrapX: REPEAT,
-        wrapY: REPEAT,
     });
 
     // Initialize GPUPrograms for simulation steps
@@ -410,7 +398,7 @@ function main({ pane, contextID, glslVersion }) {
             float e = texture(u_scalarField, v_uv + vec2(u_pxSize.x, 0)).r;
             float w = texture(u_scalarField, v_uv - vec2(u_pxSize.x, 0)).r;
 
-            out_result = texture2D(u_vectorField, v_uv).xy - 0.5 * vec2(e - w, n - s);
+            out_result = texture(u_vectorField, v_uv).xy - 0.5 * vec2(e - w, n - s);
         }`,
         uniforms: [
             {
@@ -654,68 +642,25 @@ function main({ pane, contextID, glslVersion }) {
     // Color modulation variables
     let currentColor = { r: 0.0, g: 0.0, b: 1.0 }; // Start with blue
     let targetColor = { r: 0.0, g: 0.0, b: 1.0 };
-    const COLOR_SMOOTHING = 0.8; // Adjust between 0 (no smoothing) to 1 (instant change)
+    const COLOR_SMOOTHING = 0.1; // Lower value for smoother transitions
 
-    // Boundary parameters
-    let boundaryRadius = 100.0; // Initial radius
+    // Define damping factor and create damping program
+    const DAMPING_FACTOR = 0.98;
 
-    // Initialize GPUPrograms for boundaries
-    const updateBoundary = new GPUProgram(composer, {
-        name: 'updateBoundary',
-        fragmentShader: `
-        in vec2 v_uv;
-
-        uniform float u_boundaryRadius;
-        uniform vec2 u_center;
-        uniform vec2 u_dimensions;
-
-        out float out_boundary;
-
-        void main() {
-            // Calculate distance from center
-            float distance = length((v_uv * u_dimensions) - u_center);
-            // Create a circular boundary with smooth edges
-            float boundary = smoothstep(u_boundaryRadius + 5.0, u_boundaryRadius - 5.0, distance);
-            out_boundary = boundary;
-        }
-        `,
-        uniforms: [
-            {
-                name: 'u_boundaryRadius',
-                value: 100.0, // Initial radius
-                type: FLOAT,
-            },
-            {
-                name: 'u_center',
-                value: [canvas.width / 2, canvas.height / 2],
-                type: FLOAT,
-            },
-            {
-                name: 'u_dimensions',
-                value: [canvas.width, canvas.height],
-                type: FLOAT,
-            },
-        ],
-    });
-
-    const applyBoundaries = new GPUProgram(composer, {
-        name: 'applyBoundaries',
+    const damping = new GPUProgram(composer, {
+        name: 'damping',
         fragmentShader: `
         in vec2 v_uv;
 
         uniform sampler2D u_velocity;
-        uniform sampler2D u_boundary;
+        uniform float u_damping;
 
         out vec2 out_velocity;
 
         void main() {
-            vec2 velocity = texture(u_velocity, v_uv).xy;
-            float boundary = texture(u_boundary, v_uv).x;
-            // Reduce velocity inside the boundary
-            velocity *= boundary;
+            vec2 velocity = texture(u_velocity, v_uv).xy * u_damping;
             out_velocity = velocity;
-        }
-        `,
+        }`,
         uniforms: [
             {
                 name: 'u_velocity',
@@ -723,12 +668,14 @@ function main({ pane, contextID, glslVersion }) {
                 type: INT,
             },
             {
-                name: 'u_boundary',
-                value: 1,
-                type: INT,
+                name: 'u_damping',
+                value: DAMPING_FACTOR,
+                type: FLOAT,
             },
         ],
     });
+
+    // Initialize GPUPrograms for boundaries are removed
 
     // Main simulation loop
     function loop() {
@@ -738,12 +685,14 @@ function main({ pane, contextID, glslVersion }) {
             input: [velocityState, velocityState],
             output: velocityState,
         });
+
         // Compute divergence of advected velocity field
         composer.step({
             program: divergence2D,
             input: velocityState,
             output: divergenceState,
         });
+
         // Compute the pressure gradient of the advected velocity vector field
         for (let i = 0; i < NUM_JACOBI_STEPS; i++) {
             composer.step({
@@ -752,6 +701,7 @@ function main({ pane, contextID, glslVersion }) {
                 output: pressureState,
             });
         }
+
         // Subtract the pressure gradient from velocity to obtain a velocity vector field with zero divergence
         composer.step({
             program: gradientSubtraction,
@@ -759,28 +709,15 @@ function main({ pane, contextID, glslVersion }) {
             output: velocityState,
         });
 
-        // Apply audio forces and compute target color
-        visualizeAudio();
-
-        // Update boundary radius based on low frequencies
-        boundaryRadius = 100.0 + frequencyRanges.low * BOUNDARY_SCALE;
-
-        // Update the boundary radius uniform
-        updateBoundary.setUniform('u_boundaryRadius', boundaryRadius);
-
-        // Update boundaryState
+        // Apply damping to velocity
         composer.step({
-            program: updateBoundary,
-            input: [],
-            output: boundaryState,
-        });
-
-        // Apply boundary conditions to velocity
-        composer.step({
-            program: applyBoundaries,
-            input: [velocityState, boundaryState],
+            program: damping,
+            input: velocityState,
             output: velocityState,
         });
+
+        // Apply audio forces and compute target color
+        visualizeAudio();
 
         // Smoothly interpolate currentColor towards targetColor
         currentColor.r += (targetColor.r - currentColor.r) * COLOR_SMOOTHING;
@@ -868,19 +805,20 @@ function main({ pane, contextID, glslVersion }) {
         onResize(); // Recalculate number of particles
     }));
 
-    ui.push(pane.addInput(PARAMS, 'maxVelocity', { min: 10, max: 100, step: 1, label: 'Max Velocity' }).on('change', (ev) => {
+    ui.push(pane.addInput(PARAMS, 'maxVelocity', { min: 5, max: 50, step: 1, label: 'Max Velocity' }).on('change', (ev) => {
         MAX_VELOCITY = ev.value;
         touch.setUniform('u_maxVelocity', MAX_VELOCITY);
     }));
 
-    ui.push(pane.addInput(PARAMS, 'touchForceScale', { min: 0.5, max: 5, step: 0.1, label: 'Touch Force Scale' }).on('change', (ev) => {
+    ui.push(pane.addInput(PARAMS, 'touchForceScale', { min: 0.1, max: 3, step: 0.1, label: 'Touch Force Scale' }).on('change', (ev) => {
         TOUCH_FORCE_SCALE = ev.value;
         touch.setUniform('u_touchForceScale', TOUCH_FORCE_SCALE);
     }));
 
-    ui.push(pane.addInput(PARAMS, 'boundaryScale', { min: 10, max: 100, step: 1, label: 'Boundary Scale' }).on('change', (ev) => {
-        BOUNDARY_SCALE = ev.value;
-    }));
+    // Removed boundaryScale input
+    // ui.push(pane.addInput(PARAMS, 'boundaryScale', { min: 10, max: 100, step: 1, label: 'Boundary Scale' }).on('change', (ev) => {
+    //     BOUNDARY_SCALE = ev.value;
+    // }));
 
     ui.push(pane.addButton({ title: 'Reset' }).on('click', onResize));
     ui.push(pane.addButton({ title: 'Save PNG (p)' }).on('click', savePNG));
@@ -895,7 +833,7 @@ function main({ pane, contextID, glslVersion }) {
     const playPauseBtn = audioFolder.addButton({ title: 'Play' });
     playPauseBtn.disabled = true;
 
-    audioInput.addEventListener('change', handleAudioUpload);
+    playPauseBtn.on('click', togglePlayPause);
 
     function handleAudioUpload(event) {
         const file = event.target.files[0];
@@ -910,10 +848,11 @@ function main({ pane, contextID, glslVersion }) {
 
             setupAudioProcessing();
             playPauseBtn.disabled = false;
+            playPauseBtn.title = 'Play';
+            playPauseBtn.textContent = 'Play';
+            isPlaying = false;
         }
     }
-
-    playPauseBtn.on('click', togglePlayPause);
 
     function togglePlayPause() {
         if (!audioReady) return;
@@ -959,13 +898,11 @@ function main({ pane, contextID, glslVersion }) {
         divergenceState.resize(velocityDimensions);
         pressureState.resize(velocityDimensions);
         trailState.resize([width, height]);
-        boundaryState.resize([width, height]);
+        // boundaryState.resize([width, height]); // Removed
 
         // Update uniforms
         advection.setUniform('u_dimensions', [width, height]);
         advectParticles.setUniform('u_dimensions', [width, height]);
-        updateBoundary.setUniform('u_center', [width / 2, height / 2]);
-        updateBoundary.setUniform('u_dimensions', [width, height]);
         const velocityPxSize = [1 / velocityDimensions[0], 1 / velocityDimensions[1]];
         divergence2D.setUniform('u_pxSize', velocityPxSize);
         jacobi.setUniform('u_pxSize', velocityPxSize);
@@ -974,9 +911,11 @@ function main({ pane, contextID, glslVersion }) {
         // Re-initialize particles
         NUM_PARTICLES = calcNumParticles(width, height);
         const positions = new Float32Array(NUM_PARTICLES * 4);
-        for (let i = 0; i < positions.length / 4; i++) {
+        for (let i = 0; i < NUM_PARTICLES; i++) {
             positions[POSITION_NUM_COMPONENTS * i] = Math.random() * width;
             positions[POSITION_NUM_COMPONENTS * i + 1] = Math.random() * height;
+            positions[POSITION_NUM_COMPONENTS * i + 2] = 0; // Initial displacement x
+            positions[POSITION_NUM_COMPONENTS * i + 3] = 0; // Initial displacement y
         }
         particlePositionState.resize(NUM_PARTICLES, positions);
         particleInitialState.resize(NUM_PARTICLES, positions);
@@ -1008,7 +947,7 @@ function main({ pane, contextID, glslVersion }) {
         particleInitialState.dispose();
         particleAgeState.dispose();
         trailState.dispose();
-        boundaryState.dispose();
+        // boundaryState.dispose(); // Removed
         advection.dispose();
         divergence2D.dispose();
         jacobi.dispose();
@@ -1020,8 +959,9 @@ function main({ pane, contextID, glslVersion }) {
         fadeTrails.dispose();
         renderPressure.dispose();
         touch.dispose();
-        updateBoundary.dispose();
-        applyBoundaries.dispose();
+        damping.dispose();
+        // updateBoundary.dispose(); // Removed
+        // applyBoundaries.dispose(); // Removed
         composer.dispose();
         ui.forEach(el => {
             pane.remove(el);
