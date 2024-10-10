@@ -1,4 +1,5 @@
 'use strict';
+
 {
     const {
         GLSL1,
@@ -8,8 +9,8 @@
         isWebGL2Supported,
     } = GPUIO;
 
-    // https://github.com/amandaghassaei/canvas-capture
-    const CanvasCapture = window.CanvasCapture.CanvasCapture;
+    // Check if CanvasCapture is available
+    const CanvasCapture = window.CanvasCapture ? window.CanvasCapture.CanvasCapture : null;
     const RECORD_FPS = 60;
 
     // Wait for Tweakpane to be available
@@ -30,7 +31,7 @@
             if (typeof window.main === 'function') { // Check if main is defined
                 initializeApplication();
             } else {
-                console.error('main() is not defined in index2.js');
+                console.error('main() is not defined or not accessible in the global scope');
             }
         }
     });
@@ -38,7 +39,7 @@
     function initializeApplication() {
         console.log('Initializing application...');
         // Init a simple gui.
-        const pane = new window.Tweakpane.Pane();
+        const pane = new Tweakpane.Pane();
 
         // Init a pane to toggle main pane visibility.
         const paneToggle = new window.Tweakpane.Pane();
@@ -134,14 +135,18 @@
             title = `${webGLSettings.webGLVersion}`;
             settings.title = title;
 
-            CanvasCapture.dispose();
-            CanvasCapture.init(canvas, { showRecDot: true, showDialogs: true, showAlerts: true, recDotCSS: { left: '0', right: 'auto' } });
-            CanvasCapture.bindKeyToVideoRecord('v', {
-                format: CanvasCapture.WEBM,
-                name: 'screen_recording',
-                fps: RECORD_FPS,
-                quality: 1,
-            });
+            if (CanvasCapture) {
+                CanvasCapture.init(canvas, { showRecDot: true, showDialogs: true, showAlerts: true, recDotCSS: { left: '0', right: 'auto' } });
+                CanvasCapture.bindKeyToVideoRecord('v', {
+                    format: CanvasCapture.WEBM,
+                    name: 'screen_recording',
+                    fps: RECORD_FPS,
+                    quality: 1,
+                });
+            } else {
+                console.warn('CanvasCapture is not available. Recording functionality will be disabled.');
+            }
+
         }
 
         // Add some settings to gui.
@@ -196,14 +201,18 @@
             if (loop) loop();
 
             // Screen recording.
-            CanvasCapture.checkHotkeys();
-            if (CanvasCapture.isRecording()) {
-                CanvasCapture.recordFrame();
-                numFrames++;
-                console.log(`Recording duration: ${(numFrames / RECORD_FPS).toFixed(2)} sec`);
-            } else {
-                numFrames = 0;
+            if (CanvasCapture) {
+                CanvasCapture.checkHotkeys();
+                if (CanvasCapture.isRecording()) {
+                    CanvasCapture.recordFrame();
+                    numFrames++;
+                    console.log(`Recording duration: ${(numFrames / RECORD_FPS).toFixed(2)} sec`);
+                } else {
+                    numFrames = 0;
+                }
             }
+
+            // ... rest of your code ...
         }
         // Start loop.
         outerLoop();
